@@ -1,0 +1,13 @@
+﻿name: vip
+weight: 10
+inheritances:
+  - default
+permissions:
+  - essentials.sethome.multiple.vip
+  - essentials.kits.vip
+  - essentials.repair
+  - griefdefender.claim.blocks.extra.5000
+  - griefdefender.claim.manage-trust
+  - mcmmo.ability.doublexp
+  - dynmap.marker.create
+  - shopkeepers.create.player

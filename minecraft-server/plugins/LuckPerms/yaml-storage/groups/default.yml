@@ -1,0 +1,14 @@
+﻿name: default
+weight: 1
+permissions:
+  - essentials.home
+  - essentials.spawn
+  - essentials.msg
+  - essentials.balance
+  - griefdefender.claim.basic
+  - griefdefender.flag.interact-item-secondary.minecraft.chest
+  - griefdefender.claim.blocks.buy
+  - mcmmo.skills.*
+  - shopkeepers.trade
+  - dynmap.webchat
+  - chunky.use

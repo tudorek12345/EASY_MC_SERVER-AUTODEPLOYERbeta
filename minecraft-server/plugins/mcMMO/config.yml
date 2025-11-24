@@ -1,0 +1,13 @@
+﻿experience:
+  base-multiplier: 1.0
+  mob-spawners: 0.2
+  fishing: 0.8
+skills:
+  enable-pvp-skill-damage: false
+  ability-length-modifier: 1.0
+cooldowns:
+  tree-feller: 240
+  serrated-strikes: 240
+  giga-drill-breaker: 240
+commands:
+  inspect: true
