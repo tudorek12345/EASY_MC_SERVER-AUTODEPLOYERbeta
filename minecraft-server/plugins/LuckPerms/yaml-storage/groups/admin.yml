@@ -1,6 +1,0 @@
-﻿name: admin
-weight: 100
-inheritances:
-  - mod
-permissions:
-  - '*'
