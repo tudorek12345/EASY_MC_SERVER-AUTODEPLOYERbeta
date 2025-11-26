@@ -42,3 +42,5 @@ python main.py
 - Jar download failures: ensure outbound HTTPS allowed; manual download URL stored in `JAR_DOWNLOAD.txt`.
 
 Happy hosting! 🎮
+
+All rights reserved to Heperkoo. If you need to obtain a license to use the source code above local usability, LMK.
