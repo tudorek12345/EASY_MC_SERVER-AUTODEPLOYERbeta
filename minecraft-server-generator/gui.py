@@ -148,7 +148,9 @@ class ServerGeneratorApp:
             Tooltip(entry, f"Set {label_text.lower()}. Suggested default shown.")
 
         ttk.Label(grid, text="Server Fork").grid(row=len(labels), column=0, sticky=tk.W, pady=4)
-        fork_combo = ttk.Combobox(grid, textvariable=self.fork_var, values=["Purpur", "Paper", "Spigot"], state="readonly")
+        fork_combo = ttk.Combobox(
+            grid, textvariable=self.fork_var, values=["Purpur", "Paper", "Spigot", "Forge"], state="readonly"
+        )
         fork_combo.grid(row=len(labels), column=1, sticky=tk.EW, pady=4)
         Tooltip(fork_combo, "Choose Purpur for best performance. Paper/Spigot supported.")
 
@@ -340,7 +342,7 @@ class ServerGeneratorApp:
         manual_box = ScrolledText(manual_frame, height=6, wrap=tk.WORD)
         manual_box.insert(
             tk.END,
-            "Example:\nhttps://example.com/MyPlugin.jar\nhttps://cdn.modrinth.com/xyz/latest.jar",
+            "Paste direct .jar download links here. Example:\nhttps://example.com/MyPlugin.jar\nhttps://cdn.modrinth.com/xyz/latest.jar",
         )
         manual_box.bind("<FocusIn>", lambda _e: self._clear_manual_placeholder())
         manual_box.pack(fill=tk.BOTH, expand=True)
@@ -486,6 +488,8 @@ class ServerGeneratorApp:
     # ------------------------------------------------------------------
     def _get_manual_urls(self) -> List[str]:
         if not self.manual_urls_widget:
+            return []
+        if not self._manual_placeholder_cleared:
             return []
         raw = self.manual_urls_widget.get("1.0", tk.END)
         urls = [line.strip() for line in raw.splitlines() if line.strip() and not line.startswith("Example:")]

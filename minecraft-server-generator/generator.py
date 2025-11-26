@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse, unquote
 import re
 import zipfile
+import xml.etree.ElementTree as ET
 
 try:
     import requests
@@ -28,13 +29,7 @@ class Plugin:
 
 
 DEFAULT_PLUGINS: List[Plugin] = [
-    Plugin(
-        "LuckPerms",
-        "Permissions & ranks",
-        "https://github.com/LuckPerms/LuckPerms/releases/latest",
-        download_type="github_release",
-        download_meta={"owner": "lucko", "repo": "LuckPerms", "asset_pattern": r"LuckPerms-Bukkit-.*\.jar$"},
-    ),
+    Plugin("LuckPerms", "Permissions & ranks", "https://download.luckperms.net/latest/bukkit"),
     Plugin("Vault", "Economy API", "https://github.com/MilkBowl/Vault/releases/latest/download/Vault.jar"),
     Plugin(
         "EssentialsX",
@@ -57,8 +52,28 @@ DEFAULT_PLUGINS: List[Plugin] = [
         download_type="github_release",
         download_meta={"owner": "EssentialsX", "repo": "Essentials", "asset_pattern": r"^EssentialsXSpawn-.*\.jar$"},
     ),
-    Plugin("WorldEdit", "Building tools", "https://dev.bukkit.org/projects/worldedit/files/latest"),
-    Plugin("WorldGuard", "Region protection", "https://dev.bukkit.org/projects/worldguard/files/latest"),
+    Plugin(
+        "WorldEdit",
+        "Building tools",
+        "https://maven.enginehub.org/repo/com/sk89q/worldedit/worldedit-bukkit/",
+        download_type="maven",
+        download_meta={
+            "base_url": "https://maven.enginehub.org/repo",
+            "group": "com.sk89q.worldedit",
+            "artifact": "worldedit-bukkit",
+        },
+    ),
+    Plugin(
+        "WorldGuard",
+        "Region protection",
+        "https://maven.enginehub.org/repo/com/sk89q/worldguard/worldguard-bukkit/",
+        download_type="maven",
+        download_meta={
+            "base_url": "https://maven.enginehub.org/repo",
+            "group": "com.sk89q.worldguard",
+            "artifact": "worldguard-bukkit",
+        },
+    ),
     Plugin("GriefDefender", "Claims & anti-grief", "https://github.com/bloodmc/GriefDefender/releases/latest/download/GriefDefender.zip"),
     Plugin("CoreProtect", "Block logging", "https://ci.lucko.me/job/CoreProtect/lastSuccessfulBuild/artifact/target/CoreProtect-21.6.jar"),
     Plugin("Matrix", "Anti-cheat", "https://matrix.rico-gamer.de/latest/Matrix-latest.jar"),
@@ -94,6 +109,8 @@ def _jar_download_info(fork: str, version: str) -> tuple[str, str | None]:
         return (f"paper-{version}.jar", f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds/latest/downloads/paper-{version}.jar")
     if fork_lower == "spigot":
         return (f"spigot-{version}.jar", f"https://download.getbukkit.org/spigot/spigot-{version}.jar")
+    if fork_lower == "forge":
+        return (f"forge-{version}-server.jar", None)
     return (f"server-{version}.jar", None)
 
 
@@ -142,12 +159,58 @@ def _get_github_release_asset(meta: Dict[str, str], token: Optional[str] = None)
     raise RuntimeError(f"Could not find asset matching '{pattern}' for {owner}/{repo}")
 
 
+def _get_maven_release_asset(meta: Dict[str, str]) -> Tuple[str, str]:
+    _ensure_requests_available()
+    base_url = meta["base_url"].rstrip("/")
+    group = meta["group"]
+    artifact = meta["artifact"]
+    group_path = group.replace(".", "/")
+    metadata_url = f"{base_url}/{group_path}/{artifact}/maven-metadata.xml"
+    response = requests.get(metadata_url, timeout=60)
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    version = root.findtext("./versioning/release") or root.findtext("./versioning/latest")
+    if not version:
+        versions = root.findall("./versioning/versions/version")
+        if versions:
+            version = versions[-1].text
+    if not version:
+        raise RuntimeError(f"Unable to determine version for {group}:{artifact}")
+    filename = f"{artifact}-{version}.jar"
+    download_url = f"{base_url}/{group_path}/{artifact}/{version}/{filename}"
+    return filename, download_url
+
+
+def _resolve_forge_installer(mc_version: str) -> Tuple[str, str]:
+    """Return (version_string, installer_url) for the latest Forge build matching the MC version prefix."""
+    _ensure_requests_available()
+    metadata_url = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+    response = requests.get(metadata_url, timeout=60)
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    versions = [elem.text for elem in root.findall("./versioning/versions/version") if elem.text]
+    prefix = f"{mc_version}-"
+    for version in reversed(versions):
+        if version.startswith(prefix):
+            url = f"https://maven.minecraftforge.net/net/minecraftforge/forge/{version}/forge-{version}-installer.jar"
+            return version, url
+    raise RuntimeError(
+        f"Forge installer for Minecraft {mc_version} not found. Check https://files.minecraftforge.net/ for supported versions."
+    )
+
+
 def _determine_plugin_download_url(plugin: Plugin) -> Optional[str]:
     if plugin.download_type == "github_release" and plugin.download_meta:
         if requests is None:
             return None
         try:
             _, download_url = _get_github_release_asset(plugin.download_meta, token=os.getenv("GITHUB_TOKEN"))
+            return download_url
+        except Exception:
+            return None
+    if plugin.download_type == "maven" and plugin.download_meta:
+        try:
+            _, download_url = _get_maven_release_asset(plugin.download_meta)
             return download_url
         except Exception:
             return None
@@ -164,6 +227,28 @@ def _derive_filename_from_url(url: str, fallback: str) -> str:
 
 def _render_start_sh(config: dict, jar_name: str) -> str:
     ram = config["ram_gb"]
+    is_forge = config["fork"].lower() == "forge"
+    jar_resolution = ""
+    jar_variable = "$JAR_FILE"
+    if is_forge:
+        jar_resolution = textwrap.dedent(
+            """
+            resolve_forge_jar() {
+              if [ -f "$JAR_FILE" ]; then
+                echo "$JAR_FILE"
+                return
+              fi
+              local candidate
+              candidate=$(ls forge-*-server.jar 2>/dev/null | head -n 1)
+              if [ -n "$candidate" ]; then
+                echo "$candidate"
+                return
+              fi
+              echo ""
+            }
+            """
+        ).strip()
+        jar_variable = "$(resolve_forge_jar)"
     jvm_flags = textwrap.dedent(
         f"""
         #!/bin/bash
@@ -175,9 +260,11 @@ def _render_start_sh(config: dict, jar_name: str) -> str:
           echo "tmux is required. Install via 'sudo apt install -y tmux'."
           exit 1
         fi
+        {"\n".join(jar_resolution.splitlines()) if jar_resolution else ""}
         while true; do
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
           echo "[$TIMESTAMP] Starting server..."
+          {"RESOLVED_JAR=$" + jar_variable + "\n          if [ -z \"$RESOLVED_JAR\" ]; then\n            echo \"Forge server jar not found. Run 'java -jar forge-installer.jar --installServer' first.\"\n            sleep 10\n            continue\n          fi" if is_forge else ""}
           tmux new-session -d -s "$SESSION_NAME" "exec java \\
             -Xms{ram}G -Xmx{ram}G \\
             -XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:+ParallelRefProcEnabled -XX:G1NewSizePercent=30 \\
@@ -189,7 +276,7 @@ def _render_start_sh(config: dict, jar_name: str) -> str:
             -XX:+AlwaysPreTouch \\
             -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true \\
             -Dfile.encoding=UTF-8 -Djline.terminal=jline.UnsupportedTerminal \\
-            -Dcom.mojang.eula.agree=true -jar $JAR_FILE nogui"
+            -Dcom.mojang.eula.agree=true -jar {"$RESOLVED_JAR" if is_forge else "$JAR_FILE"} nogui"
           tmux attach -t "$SESSION_NAME"
           EXIT_CODE=$?
           echo "Server exited with code $EXIT_CODE. Restarting in 10 seconds..."
@@ -203,15 +290,33 @@ def _render_start_sh(config: dict, jar_name: str) -> str:
 
 def _render_start_ps1(config: dict, jar_name: str) -> str:
     ram = config["ram_gb"]
+    is_forge = config["fork"].lower() == "forge"
+    resolve_function = ""
+    jar_var = "$jarFile"
+    if is_forge:
+        resolve_function = textwrap.dedent(
+            """
+            function Resolve-ForgeJar {
+              param($Default)
+              if (Test-Path $Default) { return $Default }
+              $candidate = Get-ChildItem -Filter 'forge-*-server.jar' | Select-Object -First 1
+              if ($candidate) { return $candidate.Name }
+              return $null
+            }
+            """
+        ).strip()
+        jar_var = "$selectedJar"
     return textwrap.dedent(
         f"""
         $ErrorActionPreference = "Stop"
         $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
         Set-Location $scriptDir
         $jarFile = "{jar_name}"
+        {resolve_function}
         while ($true) {{
           $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
           Write-Host "[$timestamp] Starting server..."
+          {"$selectedJar = Resolve-ForgeJar -Default $jarFile\n          if (-not $selectedJar) { Write-Host \"Forge jar not found. Run 'java -jar forge-installer.jar --installServer' first.\"; Start-Sleep -Seconds 10; continue }\n" if is_forge else ""}
           $arguments = @(
             "-Xms{ram}G",
             "-Xmx{ram}G",
@@ -237,7 +342,7 @@ def _render_start_ps1(config: dict, jar_name: str) -> str:
             "-Djline.terminal=jline.UnsupportedTerminal",
             "-Dcom.mojang.eula.agree=true",
             "-jar",
-            $jarFile,
+            {jar_var},
             "nogui"
           )
           & java @arguments
@@ -251,6 +356,29 @@ def _render_start_ps1(config: dict, jar_name: str) -> str:
 
 def _render_start_bat(config: dict, jar_name: str) -> str:
     ram = config["ram_gb"]
+    is_forge = config["fork"].lower() == "forge"
+    forge_block = ""
+    jar_ref = "\"%JAR_FILE%\""
+    if is_forge:
+        forge_block = textwrap.dedent(
+            """
+            set "RESOLVED_JAR=%JAR_FILE%"
+            if not exist "%RESOLVED_JAR%" (
+              set "RESOLVED_JAR="
+              for %%F in (forge-*-server.jar) do (
+                set "RESOLVED_JAR=%%F"
+                goto found_forge
+              )
+            )
+            :found_forge
+            if not defined RESOLVED_JAR (
+              echo Forge server jar not found. Run "java -jar forge-installer.jar --installServer" first.
+              timeout /t 10 /nobreak >nul
+              goto loop
+            )
+            """
+        ).strip()
+        jar_ref = "\"%RESOLVED_JAR%\""
     return textwrap.dedent(
         f"""
         @echo off
@@ -260,7 +388,8 @@ def _render_start_bat(config: dict, jar_name: str) -> str:
         set "JAVA_FLAGS=-Xms{ram}G -Xmx{ram}G -XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:+ParallelRefProcEnabled -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=85 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -XX:+AlwaysPreTouch -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -Dfile.encoding=UTF-8 -Djline.terminal=jline.UnsupportedTerminal -Dcom.mojang.eula.agree=true"
         :loop
         echo [%date% %time%] Starting server...
-        java %JAVA_FLAGS% -jar "%JAR_FILE%" nogui
+        {forge_block}
+        java %JAVA_FLAGS% -jar {jar_ref} nogui
         set EXITCODE=%ERRORLEVEL%
         echo Server exited with code %EXITCODE%. Restarting in 10 seconds...
         timeout /t 10 /nobreak >nul
@@ -684,6 +813,8 @@ def _download_plugin_to_directory(plugin: Plugin, destination: Path, token: Opti
     _ensure_requests_available()
     if plugin.download_type == "github_release" and plugin.download_meta:
         filename, download_url = _get_github_release_asset(plugin.download_meta, token)
+    elif plugin.download_type == "maven" and plugin.download_meta:
+        filename, download_url = _get_maven_release_asset(plugin.download_meta)
     else:
         filename = plugin.url.split("/")[-1] or f"{plugin.name}.jar"
         download_url = plugin.url
@@ -765,6 +896,20 @@ def _render_readme(config: dict, jar_name: str) -> str:
         {velocity_section}
         """
     ).strip()
+
+    forge_section = ""
+    if config["fork"].lower() == "forge":
+        forge_section = textwrap.dedent(
+            """
+            ## Forge-specific notes
+            - The Forge installer (`forge-installer.jar`) is included. Run `java -jar forge-installer.jar --installServer` in this folder to generate the server jar.
+            - The start scripts auto-detect the generated `forge-*-server.jar`. If it is missing, rerun the installer.
+            - Copy your mods into the `mods/` folder and ensure both client and server have matching mod versions.
+            - Forge servers do not use the Paper/Purpur configs; adjust `server.properties` and mod configs as needed.
+            """
+        ).strip()
+        setup += "\n\n" + forge_section
+
     return setup + "\n"
 
 
@@ -932,6 +1077,21 @@ def generate_server(config: dict) -> Dict[str, List[Path]]:
     target_dir.mkdir(parents=True, exist_ok=True)
 
     jar_name, jar_url = _jar_download_info(config["fork"], config["version"])
+    forge_installer_url = None
+    forge_manual_message = None
+    if config["fork"].lower() == "forge":
+        try:
+            if requests is not None:
+                _, forge_installer_url = _resolve_forge_installer(config["version"])
+            else:
+                raise RuntimeError(
+                    "Forge installer requires the 'requests' package. Install it or download manually."
+                )
+        except Exception as exc:
+            forge_manual_message = (
+                f"{exc}\nDownload the installer manually from https://files.minecraftforge.net/ "
+                "and place it here as forge-installer.jar."
+            )
     files = build_file_map(config, jar_name)
     written: List[Path] = []
     for relative, content in files.items():
@@ -943,7 +1103,22 @@ def generate_server(config: dict) -> Dict[str, List[Path]]:
         written.append(destination)
 
     jar_path = target_dir / jar_name
-    if jar_url:
+    if forge_installer_url:
+        installer_path = target_dir / "forge-installer.jar"
+        if requests is None:
+            (target_dir / "FORGE_DOWNLOAD.txt").write_text(
+                f"Download Forge installer from:\n{forge_installer_url}\nSave as forge-installer.jar and run:\n"
+                "java -jar forge-installer.jar --installServer\n",
+                encoding="utf-8",
+            )
+        else:
+            _download_file(forge_installer_url, installer_path)
+            written.append(installer_path)
+    elif forge_manual_message:
+        (target_dir / "FORGE_DOWNLOAD.txt").write_text(
+            forge_manual_message + "\n", encoding="utf-8"
+        )
+    elif jar_url:
         if requests is None:
             (target_dir / "JAR_DOWNLOAD.txt").write_text(
                 f"Download the server jar manually from:\n{jar_url}\nSave as {jar_name} in this folder.\n",
@@ -974,5 +1149,3 @@ __all__ = [
     "generate_preview",
     "install_plugins_to_server",
 ]
-
-
